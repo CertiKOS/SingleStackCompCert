@@ -805,11 +805,11 @@ Inductive globalenv_preserved {F V: Type} (ge: Genv.t F V) (j: meminj) (bound: b
       (VARINFOS: forall b gv, Genv.find_var_info ge b = Some gv -> Plt b bound).
 
 Program Definition globalenv_inject {F V: Type} (ge: Genv.t F V) (j: meminj) : massert := {|
-  m_pred := fun m => exists bound, Ple bound (Mem.nextblock m) /\ globalenv_preserved ge j bound;
+  m_pred := fun m => exists bound, Ple bound (Mem.nextblock m) /\ globalenv_preserved ge j bound /\ bound = Genv.genv_next ge;
   m_footprint := fun b ofs => False
 |}.
 Next Obligation.
-  rename H into bound. exists bound; split; auto. eapply Ple_trans; eauto. eapply Mem.unchanged_on_nextblock; eauto.
+  exists (Genv.genv_next ge); split; auto. eapply Ple_trans; eauto. eapply Mem.unchanged_on_nextblock; eauto.
 Qed.
 Next Obligation.
   tauto.
@@ -820,7 +820,7 @@ Lemma globalenv_inject_preserves_globals:
   m |= globalenv_inject ge j ->
   meminj_preserves_globals ge j.
 Proof.
-  intros. destruct H as (bound & A & B). destruct B.
+  intros. destruct H as (bound & A & B & C). destruct B.
   split; [|split]; intros.
 - eauto.
 - eauto.
@@ -834,14 +834,14 @@ Lemma globalenv_inject_incr:
   m |= globalenv_inject ge j ** P ->
   m |= globalenv_inject ge j' ** P.
 Proof.
-  intros. destruct H1 as (A & B & C). destruct A as (bound & D & E).
+  intros. destruct H1 as (A & B & C). destruct A as (bound & D & E & E').
   split; [|split]; auto.
-  exists bound; split; auto. 
+  exists bound; split; [|split]; auto. 
   inv E; constructor; intros.
 - eauto.
 - destruct (j b1) as [[b0 delta0]|] eqn:JB1.
 + erewrite H in H1 by eauto. inv H1. eauto.
-+ exploit H0; eauto. intros (X & Y). elim Y. apply Plt_le_trans with bound; auto.
++ exploit H0; eauto. intros (X & Y). elim Y. apply Plt_le_trans with (Genv.genv_next ge); auto.
 - eauto.
 - eauto.
 - eauto.

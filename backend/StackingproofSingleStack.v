@@ -17,9 +17,9 @@
 Require Import Coqlib Errors.
 Require Import Integers AST Linking.
 Require Import Values Memory Separation Events Globalenvs Smallstep.
-Require Import LTL Op Locations Linear Mach.
+Require Import LTL Op Locations Linear MachSingleStack.
 Require Import Bounds Conventions Stacklayout Lineartyping.
-Require Import Stacking.
+Require Import StackingSingleStack.
 
 Local Open Scope sep_scope.
 
@@ -72,6 +72,121 @@ Proof.
   try contradiction; try discriminate; econstructor; eauto.
 Qed.
 
+
+Lemma fe_ofs_local_pos:
+  forall b,
+    0 <= fe_ofs_local (make_env b).
+Proof.
+  destruct b.
+  Local Opaque Z.mul.
+  simpl.
+  etransitivity. 2: apply align_le ; try omega.
+  etransitivity. 2: apply size_callee_save_area_incr.
+  Local Transparent Z.mul.
+  apply Z.add_nonneg_nonneg.
+  - etransitivity. 2: apply align_le; try omega. omega. destruct Archi.ptr64; omega.
+  - destruct Archi.ptr64; omega.
+Qed.
+
+Lemma fe_ofs_arg_pos:
+  0 <= fe_ofs_arg.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma fe_ofs_link_pos:
+  forall b,
+    0 <= fe_ofs_link (make_env b).
+Proof.
+  destruct b.
+  Local Opaque Z.mul.
+  simpl.
+  etransitivity. 2: apply align_le.
+  Local Transparent Z.mul.
+  - omega.
+  - destruct Archi.ptr64; omega.
+Qed.
+
+
+Lemma fe_ofs_retaddr_pos:
+  forall b,
+    0 <= fe_ofs_retaddr (make_env b).
+Proof.
+  destruct b.
+  Local Opaque Z.mul.
+  simpl.
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  apply Z.add_nonneg_nonneg; try omega.
+  etransitivity. 2: apply align_le; try omega.
+  apply Z.add_nonneg_nonneg; try omega.
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  etransitivity. 2: apply size_callee_save_area_incr.
+  apply Z.add_nonneg_nonneg; try now (destruct Archi.ptr64; omega).
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  omega.
+Qed.
+
+
+Lemma fe_size_pos:
+  forall b,
+    0 <= fe_size (make_env b).
+Proof.
+  destruct b.
+  Local Opaque Z.mul.
+  simpl.
+  apply Z.add_nonneg_nonneg; try now (destruct Archi.ptr64; omega).
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  apply Z.add_nonneg_nonneg; try omega.
+  etransitivity. 2: apply align_le; try omega.
+  apply Z.add_nonneg_nonneg; try omega.
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  etransitivity. 2: apply size_callee_save_area_incr.
+  apply Z.add_nonneg_nonneg; try now (destruct Archi.ptr64; omega).
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  omega.
+Qed.
+
+
+Lemma fe_ofs_callee_save_pos:
+  forall b,
+    0 <= fe_ofs_callee_save (make_env b).
+Proof.
+  destruct b.
+  Local Opaque Z.mul.
+  simpl.
+  apply Z.add_nonneg_nonneg; try now (destruct Archi.ptr64; omega).
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  omega.
+Qed.
+
+Lemma fe_stack_data_pos:
+  forall b,
+    0 <= fe_stack_data (make_env b).
+Proof.
+  destruct b.
+  Local Opaque Z.mul.
+  simpl.
+  etransitivity. 2: apply align_le; omega. 
+  apply Z.add_nonneg_nonneg; try omega. 
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  etransitivity. 2: apply size_callee_save_area_incr.
+  apply Z.add_nonneg_nonneg; try now (destruct Archi.ptr64; omega).
+  etransitivity. 2: apply align_le; try now (destruct Archi.ptr64; omega).
+  omega.
+Qed.
+
+Definition shift_offset spofs ofs :=
+  Ptrofs.unsigned spofs + ofs.
+
+Lemma shift_offset_assoc:
+  forall spofs ofs z,
+    shift_offset spofs ofs + z =
+    shift_offset spofs (ofs + z).
+Proof.
+  unfold shift_offset; intros; omega.
+Qed.
+
+
 Section PRESERVATION.
 
 Variable return_address_offset: Mach.function -> Mach.code -> ptrofs -> Prop.
@@ -81,7 +196,7 @@ Hypothesis return_address_offset_exists:
   is_tail (Mcall sg ros :: c) (fn_code f) ->
   exists ofs, return_address_offset f c ofs.
 
-Let step := Mach.step return_address_offset.
+Let step := MachSingleStack.step return_address_offset.
 
 Variable prog: Linear.program.
 Variable tprog: Mach.program.
@@ -101,7 +216,7 @@ Lemma unfold_transf_function:
   tf = Mach.mkfunction
          f.(Linear.fn_sig)
          (transl_body f fe)
-         fe.(fe_size)
+         (align (fe_size fe) 8)
          (Ptrofs.repr fe.(fe_ofs_link))
          (Ptrofs.repr fe.(fe_ofs_retaddr)).
 Proof.
@@ -140,39 +255,49 @@ Qed.
 
 Local Opaque Z.add Z.mul Z.divide.
 
+
 (** Accessing the stack frame using [load_stack] and [store_stack]. *)
 
 Lemma contains_get_stack:
-  forall spec m ty sp ofs,
-  m |= contains (chunk_of_type ty) sp ofs spec ->
-  exists v, load_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr ofs) = Some v /\ spec v.
+  forall spec m ty sp spofs ofs,
+    0 <= ofs <= Ptrofs.max_unsigned ->
+    m |= contains (chunk_of_type ty) sp (shift_offset spofs ofs) spec ->
+    exists v, load_stack m (Vptr sp spofs) ty (Ptrofs.repr ofs) = Some v /\ spec v.
 Proof.
   intros. unfold load_stack. 
-  replace (Val.offset_ptr (Vptr sp Ptrofs.zero) (Ptrofs.repr ofs)) with (Vptr sp (Ptrofs.repr ofs)).
+  replace (Val.offset_ptr (Vptr sp spofs) (Ptrofs.repr ofs)) with (Vptr sp (Ptrofs.repr (shift_offset spofs ofs))).
   eapply loadv_rule; eauto.
-  simpl. rewrite Ptrofs.add_zero_l; auto.
+  simpl. unfold shift_offset.
+  rewrite Ptrofs.add_unsigned.
+  f_equal.
+  rewrite Ptrofs.unsigned_repr; auto.
 Qed.
 
 Lemma hasvalue_get_stack:
-  forall ty m sp ofs v,
-  m |= hasvalue (chunk_of_type ty) sp ofs v ->
-  load_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr ofs) = Some v.
+  forall ty m sp spofs ofs v,
+    0 <= ofs <= Ptrofs.max_unsigned ->
+    m |= hasvalue (chunk_of_type ty) sp (shift_offset spofs ofs) v ->
+    load_stack m (Vptr sp spofs) ty (Ptrofs.repr ofs) = Some v.
 Proof.
   intros. exploit contains_get_stack; eauto. intros (v' & A & B). congruence.
 Qed.
 
 Lemma contains_set_stack:
-  forall (spec: val -> Prop) v spec1 m ty sp ofs P,
-  m |= contains (chunk_of_type ty) sp ofs spec1 ** P ->
-  spec (Val.load_result (chunk_of_type ty) v) ->
-  exists m',
-      store_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr ofs) v = Some m'
-  /\ m' |= contains (chunk_of_type ty) sp ofs spec ** P.
+  forall (spec: val -> Prop) v spec1 m ty sp spofs ofs P,
+      0 <= ofs <= Ptrofs.max_unsigned ->
+      m |= contains (chunk_of_type ty) sp (shift_offset spofs ofs) spec1 ** P ->
+      spec (Val.load_result (chunk_of_type ty) v) ->
+      exists m',
+        store_stack m (Vptr sp spofs) ty (Ptrofs.repr ofs) v = Some m'
+        /\ m' |= contains (chunk_of_type ty) sp (shift_offset spofs ofs) spec ** P.
 Proof.
   intros. unfold store_stack. 
-  replace (Val.offset_ptr (Vptr sp Ptrofs.zero) (Ptrofs.repr ofs)) with (Vptr sp (Ptrofs.repr ofs)).
+  replace (Val.offset_ptr (Vptr sp spofs) (Ptrofs.repr ofs)) with (Vptr sp (Ptrofs.repr (shift_offset spofs ofs))).
   eapply storev_rule; eauto.
-  simpl. rewrite Ptrofs.add_zero_l; auto.
+  simpl. unfold shift_offset.
+  rewrite Ptrofs.add_unsigned.
+  f_equal.
+  rewrite Ptrofs.unsigned_repr; auto.
 Qed.
 
 (** [contains_locations j sp pos bound sl ls] is a separation logic assertion
@@ -223,57 +348,85 @@ Proof.
 Qed.
 
 Lemma get_location:
-  forall m j sp pos bound sl ls ofs ty,
-  m |= contains_locations j sp pos bound sl ls ->
-  0 <= ofs -> ofs + typesize ty <= bound -> (typealign ty | ofs) ->
+  forall m j sp spofs pos bound sl ls ofs ty,
+  m |= contains_locations j sp (shift_offset spofs pos) bound sl ls ->
+  0 <= pos -> 0 <= ofs -> ofs + typesize ty <= bound -> (typealign ty | ofs) ->
   exists v,
-     load_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr (pos + 4 * ofs)) = Some v
+     load_stack m (Vptr sp spofs) ty (Ptrofs.repr (pos + 4 * ofs)) = Some v
   /\ Val.inject j (ls (S sl ofs ty)) v.
 Proof.
   intros. destruct H as (D & E & F & G & H).
   exploit H; eauto. intros (v & U & V). exists v; split; auto.
-  unfold load_stack; simpl. rewrite Ptrofs.add_zero_l, Ptrofs.unsigned_repr; auto.
-  unfold Ptrofs.max_unsigned. generalize (typesize_pos ty). omega.
+  unfold load_stack; simpl. rewrite Ptrofs.add_unsigned.
+  rewrite (Ptrofs.unsigned_repr (pos + 4 * ofs)).
+  rewrite Ptrofs.unsigned_repr.
+  - rewrite Z.add_assoc; auto.
+  - unfold shift_offset in *. unfold Ptrofs.max_unsigned. generalize (typesize_pos ty). omega.
+  - unfold Ptrofs.max_unsigned, shift_offset in *.
+    generalize (Ptrofs.unsigned_range spofs). 
+    generalize (typesize_pos ty). Psatz.lia.
 Qed.
 
+Lemma store_stack_rew:
+  forall m sp spofs ty pos ofs v bound
+    (E: 0 <= shift_offset spofs pos)
+    (F: shift_offset spofs pos + 4 * bound <= Ptrofs.modulus)
+    (G: 0 <= ofs)
+    (H: ofs + typesize ty <= bound)
+    (I: 0 <= pos),
+    store_stack m (Vptr sp spofs) ty (Ptrofs.repr (pos + 4 * ofs)) v =
+    Mem.store (chunk_of_type ty) m sp (shift_offset spofs pos + 4 * ofs) v.
+Proof.
+  intros. unfold store_stack, shift_offset; simpl.
+  f_equal.
+  rewrite Ptrofs.add_unsigned.
+  rewrite (Ptrofs.unsigned_repr (pos + 4 * ofs)).
+  rewrite Ptrofs.unsigned_repr.
+  - rewrite Z.add_assoc; auto.
+  - unfold shift_offset in *. unfold Ptrofs.max_unsigned. generalize (typesize_pos ty). omega.
+  - unfold Ptrofs.max_unsigned, shift_offset in *.
+    generalize (Ptrofs.unsigned_range spofs).
+    generalize (typesize_pos ty). Psatz.lia.
+Qed.
+
+
 Lemma set_location:
-  forall m j sp pos bound sl ls P ofs ty v v',
-  m |= contains_locations j sp pos bound sl ls ** P ->
-  0 <= ofs -> ofs + typesize ty <= bound -> (typealign ty | ofs) ->
+  forall m j sp spofs pos bound sl ls P ofs ty v v',
+  m |= contains_locations j sp (shift_offset spofs pos) bound sl ls ** P ->
+  0 <= pos -> 0 <= ofs -> ofs + typesize ty <= bound -> (typealign ty | ofs) ->
   Val.inject j v v' ->
   exists m',
-     store_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr (pos + 4 * ofs)) v' = Some m'
-  /\ m' |= contains_locations j sp pos bound sl (Locmap.set (S sl ofs ty) v ls) ** P.
+     store_stack m (Vptr sp spofs) ty (Ptrofs.repr (pos + 4 * ofs)) v' = Some m'
+  /\ m' |= contains_locations j sp (shift_offset spofs pos) bound sl (Locmap.set (S sl ofs ty) v ls) ** P.
 Proof.
   intros. destruct H as (A & B & C). destruct A as (D & E & F & G & H).
   edestruct Mem.valid_access_store as [m' STORE]. 
-  eapply valid_access_location; eauto. 
-  assert (PERM: Mem.range_perm m' sp pos (pos + 4 * bound) Cur Freeable).
+  eapply valid_access_location; eauto.
+  assert (PERM: Mem.range_perm m' sp (shift_offset spofs pos) (shift_offset spofs pos + 4 * bound) Cur Freeable).
   { red; intros; eauto with mem. }
   exists m'; split.
-- unfold store_stack; simpl. rewrite Ptrofs.add_zero_l, Ptrofs.unsigned_repr; eauto.
-  unfold Ptrofs.max_unsigned. generalize (typesize_pos ty). omega.
-- simpl. intuition auto.
-+ unfold Locmap.set. 
-  destruct (Loc.eq (S sl ofs ty) (S sl ofs0 ty0)); [|destruct (Loc.diff_dec (S sl ofs ty) (S sl ofs0 ty0))].
-* (* same location *)
-  inv e. rename ofs0 into ofs. rename ty0 into ty.
-  exists (Val.load_result (chunk_of_type ty) v'); split.
-  eapply Mem.load_store_similar_2; eauto. omega. 
-  apply Val.load_result_inject; auto.
-* (* different locations *)
-  exploit H; eauto. intros (v0 & X & Y). exists v0; split; auto.
-  rewrite <- X; eapply Mem.load_store_other; eauto.
-  destruct d. congruence. right. rewrite ! size_type_chunk, ! typesize_typesize. omega.
-* (* overlapping locations *)
-  destruct (Mem.valid_access_load m' (chunk_of_type ty0) sp (pos + 4 * ofs0)) as [v'' LOAD].
-  apply Mem.valid_access_implies with Writable; auto with mem. 
-  eapply valid_access_location; eauto.
-  exists v''; auto.
-+ apply (m_invar P) with m; auto. 
-  eapply Mem.store_unchanged_on; eauto. 
-  intros i; rewrite size_type_chunk, typesize_typesize. intros; red; intros.
-  eelim C; eauto. simpl. split; auto. omega.
+  - erewrite store_stack_rew; eauto.
+  - simpl. intuition auto.
+    + unfold Locmap.set. 
+      destruct (Loc.eq (S sl ofs ty) (S sl ofs0 ty0)); [|destruct (Loc.diff_dec (S sl ofs ty) (S sl ofs0 ty0))].
+      * (* same location *)
+        inv e. rename ofs0 into ofs. rename ty0 into ty.
+        exists (Val.load_result (chunk_of_type ty) v'); split.
+        eapply Mem.load_store_similar_2; eauto. omega. 
+        apply Val.load_result_inject; auto.
+      * (* different locations *)
+        exploit H; eauto. intros (v0 & X & Y). exists v0; split; auto.
+        rewrite <- X; eapply Mem.load_store_other; eauto.
+        destruct d. congruence. right. rewrite ! size_type_chunk, ! typesize_typesize. omega.
+      * (* overlapping locations *)
+        destruct (Mem.valid_access_load m' (chunk_of_type ty0) sp (shift_offset spofs pos + 4 * ofs0)) as [v'' LOAD].
+        apply Mem.valid_access_implies with Writable; auto with mem. 
+        eapply valid_access_location; eauto.
+        exists v''; auto.
+    + apply (m_invar P) with m; auto. 
+      eapply Mem.store_unchanged_on; eauto. 
+      intros i; rewrite size_type_chunk, typesize_typesize. intros; red; intros.
+      eelim C; eauto. simpl. split; auto. omega.
 Qed.
 
 Lemma initial_locations:
@@ -365,82 +518,91 @@ In addition, we use a nonseparating conjunction to record the fact that
 we have full access rights on the stack frame, except the part that
 represents the Linear stack data. *)
 
-Definition frame_contents_1 (j: meminj) (sp: block) (ls ls0: locset) (parent retaddr: val) :=
-    contains_locations j sp fe.(fe_ofs_local) b.(bound_local) Local ls
- ** contains_locations j sp fe_ofs_arg b.(bound_outgoing) Outgoing ls
- ** hasvalue Mptr sp fe.(fe_ofs_link) parent
- ** hasvalue Mptr sp fe.(fe_ofs_retaddr) retaddr
- ** contains_callee_saves j sp fe.(fe_ofs_callee_save) b.(used_callee_save) ls0.
+Definition frame_contents_1 (j: meminj) (sp: block) (ofs: ptrofs) (ls ls0: locset) (parent retaddr: val) :=
+    contains_locations j sp (Ptrofs.unsigned ofs + fe.(fe_ofs_local)) b.(bound_local) Local ls
+ ** contains_locations j sp (Ptrofs.unsigned ofs + fe_ofs_arg) b.(bound_outgoing) Outgoing ls
+ ** hasvalue Mptr sp (Ptrofs.unsigned ofs + fe.(fe_ofs_link)) parent
+ ** hasvalue Mptr sp (Ptrofs.unsigned ofs + fe.(fe_ofs_retaddr)) retaddr
+ ** contains_callee_saves j sp (Ptrofs.unsigned ofs + fe.(fe_ofs_callee_save)) b.(used_callee_save) ls0.
 
-Definition frame_contents (j: meminj) (sp: block) (ls ls0: locset) (parent retaddr: val) :=
-  mconj (frame_contents_1 j sp ls ls0 parent retaddr)
-        (range sp 0 fe.(fe_stack_data) **
-         range sp (fe.(fe_stack_data) + b.(bound_stack_data)) fe.(fe_size)).
+Definition frame_contents (j: meminj) (sp: block) (ofs: ptrofs) (ls ls0: locset) (parent retaddr: val) :=
+  mconj (frame_contents_1 j sp ofs ls ls0 parent retaddr)
+        (range sp (Ptrofs.unsigned ofs) (Ptrofs.unsigned ofs + fe.(fe_stack_data)) **
+         range sp (Ptrofs.unsigned ofs + fe.(fe_stack_data) + b.(bound_stack_data)) (Ptrofs.unsigned ofs + fe.(fe_size))).
 
 (** Accessing components of the frame. *)
 
+
 Lemma frame_get_local:
-  forall ofs ty j sp ls ls0 parent retaddr m P,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
+  forall ofs ty j sp spofs ls ls0 parent retaddr m P,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
   slot_within_bounds b Local ofs ty -> slot_valid f Local ofs ty = true ->
   exists v,
-     load_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr (offset_local fe ofs)) = Some v
+     load_stack m (Vptr sp spofs) ty (Ptrofs.repr (offset_local fe ofs)) = Some v
   /\ Val.inject j (ls (S Local ofs ty)) v.
 Proof.
   unfold frame_contents, frame_contents_1; intros. unfold slot_valid in H1; InvBooleans.
   apply mconj_proj1 in H. apply sep_proj1 in H. apply sep_proj1 in H.
-  eapply get_location; eauto. 
+  eapply get_location; eauto.
+  apply fe_ofs_local_pos.
 Qed.
 
 Lemma frame_get_outgoing:
-  forall ofs ty j sp ls ls0 parent retaddr m P,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
+  forall ofs ty j sp spofs ls ls0 parent retaddr m P,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
   slot_within_bounds b Outgoing ofs ty -> slot_valid f Outgoing ofs ty = true ->
   exists v,
-     load_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr (offset_arg ofs)) = Some v
+     load_stack m (Vptr sp spofs) ty (Ptrofs.repr (offset_arg ofs)) = Some v
   /\ Val.inject j (ls (S Outgoing ofs ty)) v.
 Proof.
   unfold frame_contents, frame_contents_1; intros. unfold slot_valid in H1; InvBooleans.
   apply mconj_proj1 in H. apply sep_proj1 in H. apply sep_pick2 in H.
-  eapply get_location; eauto. 
+  eapply get_location; eauto.
+  apply fe_ofs_arg_pos.
 Qed.
 
 Lemma frame_get_parent:
-  forall j sp ls ls0 parent retaddr m P,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
-  load_stack m (Vptr sp Ptrofs.zero) Tptr (Ptrofs.repr fe.(fe_ofs_link)) = Some parent.
+  forall j sp spofs ls ls0 parent retaddr m P,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
+  load_stack m (Vptr sp spofs) Tptr (Ptrofs.repr fe.(fe_ofs_link)) = Some parent.
 Proof.
   unfold frame_contents, frame_contents_1; intros.
   apply mconj_proj1 in H. apply sep_proj1 in H. apply sep_pick3 in H. rewrite <- chunk_of_Tptr in H.
   eapply hasvalue_get_stack; eauto.
+  destruct H.
+  generalize (fe_ofs_link_pos b).
+  generalize (Ptrofs.unsigned_range spofs). fold fe. omega.
 Qed.
 
 Lemma frame_get_retaddr:
-  forall j sp ls ls0 parent retaddr m P,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
-  load_stack m (Vptr sp Ptrofs.zero) Tptr (Ptrofs.repr fe.(fe_ofs_retaddr)) = Some retaddr.
+  forall j sp spofs ls ls0 parent retaddr m P,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
+  load_stack m (Vptr sp spofs) Tptr (Ptrofs.repr fe.(fe_ofs_retaddr)) = Some retaddr.
 Proof.
   unfold frame_contents, frame_contents_1; intros.
   apply mconj_proj1 in H. apply sep_proj1 in H. apply sep_pick4 in H. rewrite <- chunk_of_Tptr in H.
   eapply hasvalue_get_stack; eauto.
+  destruct H.
+  generalize (fe_ofs_retaddr_pos b).
+  generalize (Ptrofs.unsigned_range spofs). fold fe. omega.
 Qed.
 
 (** Assigning a [Local] or [Outgoing] stack slot. *)
 
 Lemma frame_set_local:
-  forall ofs ty v v' j sp ls ls0 parent retaddr m P,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
+  forall ofs ty v v' j sp spofs ls ls0 parent retaddr m P,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
   slot_within_bounds b Local ofs ty -> slot_valid f Local ofs ty = true ->
   Val.inject j v v' ->
   exists m',
-     store_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr (offset_local fe ofs)) v' = Some m'
-  /\ m' |= frame_contents j sp (Locmap.set (S Local ofs ty) v ls) ls0 parent retaddr ** P.
+     store_stack m (Vptr sp spofs) ty (Ptrofs.repr (offset_local fe ofs)) v' = Some m'
+  /\ m' |= frame_contents j sp spofs (Locmap.set (S Local ofs ty) v ls) ls0 parent retaddr ** P.
 Proof.
   intros. unfold frame_contents in H.
   exploit mconj_proj1; eauto. unfold frame_contents_1. 
   rewrite ! sep_assoc; intros SEP.
   unfold slot_valid in H1; InvBooleans. simpl in H0. 
-  exploit set_location; eauto. intros (m' & A & B).
+  exploit set_location; eauto. apply fe_ofs_local_pos. intros (m' & A & B).
   exists m'; split; auto.
   assert (forall i k p, Mem.perm m sp i k p -> Mem.perm m' sp i k p).
   {  intros. unfold store_stack in A; simpl in A. eapply Mem.perm_store_1; eauto. }
@@ -453,19 +615,19 @@ Proof.
 Qed.
 
 Lemma frame_set_outgoing:
-  forall ofs ty v v' j sp ls ls0 parent retaddr m P,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
+  forall ofs ty v v' j sp spofs ls ls0 parent retaddr m P,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
   slot_within_bounds b Outgoing ofs ty -> slot_valid f Outgoing ofs ty = true ->
   Val.inject j v v' ->
   exists m',
-     store_stack m (Vptr sp Ptrofs.zero) ty (Ptrofs.repr (offset_arg ofs)) v' = Some m'
-  /\ m' |= frame_contents j sp (Locmap.set (S Outgoing ofs ty) v ls) ls0 parent retaddr ** P.
+     store_stack m (Vptr sp spofs) ty (Ptrofs.repr (offset_arg ofs)) v' = Some m'
+  /\ m' |= frame_contents j sp spofs (Locmap.set (S Outgoing ofs ty) v ls) ls0 parent retaddr ** P.
 Proof.
   intros. unfold frame_contents in H.
   exploit mconj_proj1; eauto. unfold frame_contents_1.
   rewrite ! sep_assoc, sep_swap. intros SEP. 
   unfold slot_valid in H1; InvBooleans. simpl in H0. 
-  exploit set_location; eauto. intros (m' & A & B).
+  exploit set_location; eauto. apply fe_ofs_arg_pos. intros (m' & A & B).
   exists m'; split; auto.
   assert (forall i k p, Mem.perm m sp i k p -> Mem.perm m' sp i k p).
   {  intros. unfold store_stack in A; simpl in A. eapply Mem.perm_store_1; eauto. }
@@ -480,11 +642,11 @@ Qed.
 (** Invariance by change of location maps. *)
 
 Lemma frame_contents_exten:
-  forall ls ls0 ls' ls0' j sp parent retaddr P m,
+  forall ls ls0 ls' ls0' j sp spofs parent retaddr P m,
   (forall sl ofs ty, ls' (S sl ofs ty) = ls (S sl ofs ty)) ->
   (forall r, In r b.(used_callee_save) -> ls0' (R r) = ls0 (R r)) ->
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
-  m |= frame_contents j sp ls' ls0' parent retaddr ** P.
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
+  m |= frame_contents j sp spofs ls' ls0' parent retaddr ** P.
 Proof.
   unfold frame_contents, frame_contents_1; intros.
   rewrite <- ! (contains_locations_exten ls ls') by auto.
@@ -495,17 +657,17 @@ Qed.
 (** Invariance by assignment to registers. *)
 
 Corollary frame_set_reg:
-  forall r v j sp ls ls0 parent retaddr m P,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
-  m |= frame_contents j sp (Locmap.set (R r) v ls) ls0 parent retaddr ** P.
+  forall r v j sp spofs ls ls0 parent retaddr m P,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
+  m |= frame_contents j sp spofs (Locmap.set (R r) v ls) ls0 parent retaddr ** P.
 Proof.
   intros. apply frame_contents_exten with ls ls0; auto.
 Qed.
 
 Corollary frame_undef_regs:
-  forall j sp ls ls0 parent retaddr m P rl,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
-  m |= frame_contents j sp (LTL.undef_regs rl ls) ls0 parent retaddr ** P.
+  forall j sp spofs ls ls0 parent retaddr m P rl,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
+  m |= frame_contents j sp spofs (LTL.undef_regs rl ls) ls0 parent retaddr ** P.
 Proof.
 Local Opaque sepconj.
   induction rl; simpl; intros.
@@ -514,9 +676,9 @@ Local Opaque sepconj.
 Qed.
 
 Corollary frame_set_regpair:
-  forall j sp ls0 parent retaddr m P p v ls,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
-  m |= frame_contents j sp (Locmap.setpair p v ls) ls0 parent retaddr ** P.
+  forall j sp spofs ls0 parent retaddr m P p v ls,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
+  m |= frame_contents j sp spofs (Locmap.setpair p v ls) ls0 parent retaddr ** P.
 Proof.
   intros. destruct p; simpl.
   apply frame_set_reg; auto.
@@ -524,9 +686,9 @@ Proof.
 Qed.
 
 Corollary frame_set_res:
-  forall j sp ls0 parent retaddr m P res v ls,
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
-  m |= frame_contents j sp (Locmap.setres res v ls) ls0 parent retaddr ** P.
+  forall j sp spofs ls0 parent retaddr m P res v ls,
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
+  m |= frame_contents j sp spofs (Locmap.setres res v ls) ls0 parent retaddr ** P.
 Proof.
   induction res; simpl; intros.
 - apply frame_set_reg; auto.
@@ -537,10 +699,10 @@ Qed.
 (** Invariance by change of memory injection. *)
 
 Lemma frame_contents_incr:
-  forall j sp ls ls0 parent retaddr m P j',
-  m |= frame_contents j sp ls ls0 parent retaddr ** P ->
+  forall j sp spofs ls ls0 parent retaddr m P j',
+  m |= frame_contents j sp spofs ls ls0 parent retaddr ** P ->
   inject_incr j j' ->
-  m |= frame_contents j' sp ls ls0 parent retaddr ** P.
+  m |= frame_contents j' sp spofs ls ls0 parent retaddr ** P.
 Proof.
   unfold frame_contents, frame_contents_1; intros.
   rewrite <- (contains_locations_incr j j') by auto.
@@ -922,12 +1084,24 @@ Qed.
   the register save areas of the current frame do contain the
   values of the callee-save registers used by the function. *)
 
+
+Lemma shift_offset_le:
+  forall spofs a b,
+    a <= b ->
+    shift_offset spofs a <= shift_offset spofs b.
+Proof.
+  clear.
+  intros.
+  unfold shift_offset. omega.
+Qed.
+
 Section SAVE_CALLEE_SAVE.
 
 Variable j: meminj.
 Variable cs: list stackframe.
 Variable fb: block.
 Variable sp: block.
+Variable spofs: ptrofs.
 Variable ls: locset.
 
 Hypothesis ls_temp_undef:
@@ -935,21 +1109,83 @@ Hypothesis ls_temp_undef:
 
 Hypothesis wt_ls: forall r, Val.has_type (ls (R r)) (mreg_type r).
 
+Hypothesis spofs_aligned:
+  Ptrofs.unsigned spofs = align (Ptrofs.unsigned spofs) 8.
+
+Lemma align_distr:
+  forall al (AlPos: al > 0) z z1,
+    align z al + align z1 al = align (align z al + z1) al.
+Proof.
+  intros.
+  generalize (align_divides z al AlPos).
+  generalize (align z al).
+  unfold align.  intros z0 [x EQ]. subst.
+  rewrite <- Z.mul_add_distr_r.
+  f_equal. replace (x*al + z1 + al - 1) with ((x*al) + (z1 + al - 1)) by omega.
+  rewrite Z.div_add_l. auto. omega.
+Qed.
+
+Ltac elim_div :=
+  unfold Zdiv, Zmod in *;
+  repeat
+    match goal with
+      |  H : context[ Zdiv_eucl ?X ?Y ] |-  _ =>
+         generalize (Z_div_mod_full X Y) ; destruct (Zdiv_eucl X Y)
+      |  |-  context[ Zdiv_eucl ?X ?Y ] =>
+         generalize (Z_div_mod_full X Y) ; destruct (Zdiv_eucl X Y)
+    end; unfold Remainder.
+
+Lemma align_plus:
+  forall al z,
+    al = 4 \/ al = 8 ->
+    align (align z 8) al = align z 8.
+Proof.
+  intros al z.
+  unfold align. intros.
+  elim_div. assert (al <> 0) by omega.
+  intuition subst; omega.
+Qed.
+
+Lemma shift_offset_aligned:
+  forall ofs al,
+    al = 4 \/ al = 8 ->
+    shift_offset spofs (align ofs al) = align (shift_offset spofs ofs) al.
+Proof.
+  unfold shift_offset; intros.
+  rewrite spofs_aligned.
+  erewrite <- align_plus; eauto.
+  rewrite <- align_distr. reflexivity.
+  destruct H; omega.
+Qed.
+
+Lemma range_contains_shift:
+  forall chunk b spofs ofs P m,
+  m |= range b (shift_offset spofs ofs) (shift_offset spofs (ofs + size_chunk chunk)) ** P ->
+  (align_chunk chunk | shift_offset spofs ofs) ->
+  m |= contains chunk b (shift_offset spofs ofs) (fun v => True) ** P.
+Proof.
+  clear.
+  intros.
+  eapply range_contains; eauto.
+  unfold shift_offset in *. rewrite <- Z.add_assoc. auto.
+Qed.
+
 Lemma save_callee_save_rec_correct:
   forall k l pos rs m P,
   (forall r, In r l -> is_callee_save r = true) ->
-  m |= range sp pos (size_callee_save_area_rec l pos) ** P ->
+  m |= range sp (shift_offset spofs pos) (shift_offset spofs (size_callee_save_area_rec l pos)) ** P ->
   agree_regs j ls rs ->
+  0 <= pos ->
   exists rs', exists m',
      star step tge
-        (State cs fb (Vptr sp Ptrofs.zero) (save_callee_save_rec l pos k) rs m)
-     E0 (State cs fb (Vptr sp Ptrofs.zero) k rs' m')
-  /\ m' |= contains_callee_saves j sp pos l ls ** P
+        (State cs fb (Vptr sp spofs) (save_callee_save_rec l pos k) rs m)
+     E0 (State cs fb (Vptr sp spofs) k rs' m')
+  /\ m' |= contains_callee_saves j sp (shift_offset spofs pos) l ls ** P
   /\ (forall ofs k p, Mem.perm m sp ofs k p -> Mem.perm m' sp ofs k p)
   /\ agree_regs j ls rs'.
 Proof.
 Local Opaque mreg_type.
-  induction l as [ | r l]; simpl; intros until P; intros CS SEP AG.
+  induction l as [ | r l]; simpl; intros until P; intros CS SEP AG POSpos.
 - exists rs, m. 
   split. apply star_refl.
   split. rewrite sep_pure; split; auto. eapply sep_drop; eauto.
@@ -961,16 +1197,36 @@ Local Opaque mreg_type.
   assert (SZPOS: sz > 0) by (apply AST.typesize_pos).
   assert (SZREC: pos1 + sz <= size_callee_save_area_rec l (pos1 + sz)) by (apply size_callee_save_area_rec_incr).
   assert (POS1: pos <= pos1) by (apply align_le; auto).
-  assert (AL1: (align_chunk (chunk_of_type ty) | pos1)).
+  assert (AL1: (align_chunk (chunk_of_type ty) | shift_offset spofs pos1)).
   { unfold pos1. apply Zdivide_trans with sz.
     unfold sz; rewrite <- size_type_chunk. apply align_size_chunk_divides.
+    apply Z.divide_add_r.
+    rewrite spofs_aligned.
+    eapply Zdivide_trans.
+    apply align_divides; auto.
+    rewrite <- align_plus with (al:=sz).
+    apply Zdivide_refl. unfold sz. destruct ty; simpl; auto.
     apply align_divides; auto. }
-  apply range_drop_left with (mid := pos1) in SEP; [ | omega ].
-  apply range_split with (mid := pos1 + sz) in SEP; [ | omega ].
+  apply range_drop_left with (mid := shift_offset spofs pos1) in SEP ; [ | split; apply shift_offset_le; omega ].
+  apply range_split with (mid := shift_offset spofs (pos1 + sz)) in SEP; [ | split; apply shift_offset_le; omega ].
   unfold sz at 1 in SEP. rewrite <- size_type_chunk in SEP.
-  apply range_contains in SEP; auto.
+  apply range_contains_shift in SEP; auto.
   exploit (contains_set_stack (fun v' => Val.inject j (ls (R r)) v') (rs r)).
-  eexact SEP.
+  2: eexact SEP.
+  {
+    split. omega.
+    assert (size_callee_save_area_rec l (pos1 + sz) <= Ptrofs.modulus).
+    {
+      destruct SEP.
+      destruct H0.
+      destruct H0. destruct H0.
+      destruct H3.
+      clear - H3. unfold shift_offset in H3.
+      generalize (Ptrofs.unsigned_range spofs); omega.
+    }
+    unfold Ptrofs.max_unsigned.
+    generalize (size_callee_save_area_rec_incr l (pos1 + sz)). omega.
+  }
   apply load_result_inject; auto. apply wt_ls. 
   clear SEP; intros (m1 & STORE & SEP).
   set (rs1 := undef_regs (destroyed_by_setstack ty) rs).
@@ -980,10 +1236,20 @@ Local Opaque mreg_type.
     rewrite undef_regs_other by auto. apply AG. }
   rewrite sep_swap in SEP. 
   exploit (IHl (pos1 + sz) rs1 m1); eauto.
+  {
+    apply Z.add_nonneg_nonneg; omega.
+  }
   intros (rs2 & m2 & A & B & C & D).
   exists rs2, m2. 
   split. eapply star_left; eauto. constructor. exact STORE. auto. traceEq.
-  split. rewrite sep_assoc, sep_swap. exact B.
+  split. rewrite sep_assoc, sep_swap.
+  {
+    replace (align (shift_offset spofs pos) sz) with (shift_offset spofs pos1).
+    rewrite shift_offset_assoc.
+    exact B.
+    unfold pos1.
+    apply shift_offset_aligned. unfold sz. clear. destruct ty; simpl; omega.
+  }
   split. intros. apply C. unfold store_stack in STORE; simpl in STORE. eapply Mem.perm_store_1; eauto.
   auto.
 Qed.
@@ -1024,28 +1290,31 @@ Proof.
 Qed.
 
 Lemma save_callee_save_correct:
-  forall j ls ls0 rs sp cs fb k m P,
-  m |= range sp fe.(fe_ofs_callee_save) (size_callee_save_area b fe.(fe_ofs_callee_save)) ** P ->
+  forall j ls ls0 rs sp spofs cs fb k m P,
+  m |= range sp (shift_offset spofs fe.(fe_ofs_callee_save)) (shift_offset spofs (size_callee_save_area b fe.(fe_ofs_callee_save))) ** P ->
   (forall r, Val.has_type (ls (R r)) (mreg_type r)) ->
+  Ptrofs.unsigned spofs = align (Ptrofs.unsigned spofs) 8 ->
   agree_callee_save ls ls0 ->
   agree_regs j ls rs ->
   let ls1 := LTL.undef_regs destroyed_at_function_entry (LTL.call_regs ls) in
   let rs1 := undef_regs destroyed_at_function_entry rs in
   exists rs', exists m',
      star step tge
-        (State cs fb (Vptr sp Ptrofs.zero) (save_callee_save fe k) rs1 m)
-     E0 (State cs fb (Vptr sp Ptrofs.zero) k rs' m')
-  /\ m' |= contains_callee_saves j sp fe.(fe_ofs_callee_save) b.(used_callee_save) ls0 ** P
+        (State cs fb (Vptr sp spofs) (save_callee_save fe k) rs1 m)
+     E0 (State cs fb (Vptr sp spofs) k rs' m')
+  /\ m' |= contains_callee_saves j sp (shift_offset spofs fe.(fe_ofs_callee_save)) b.(used_callee_save) ls0 ** P
   /\ (forall ofs k p, Mem.perm m sp ofs k p -> Mem.perm m' sp ofs k p)
   /\ agree_regs j ls1 rs'.
 Proof.
-  intros until P; intros SEP TY AGCS AG; intros ls1 rs1.
-  exploit (save_callee_save_rec_correct j cs fb sp ls1).
+  intros until P; intros SEP TY spofs_aligned AGCS AG; intros ls1 rs1.
+  exploit (save_callee_save_rec_correct j cs fb sp spofs ls1).
 - intros. unfold ls1. apply LTL_undef_regs_same. eapply destroyed_by_setstack_function_entry; eauto.
-- intros. unfold ls1. apply undef_regs_type. apply TY. 
+- intros. unfold ls1. apply undef_regs_type. apply TY.
+- auto.
 - exact b.(used_callee_save_prop).
 - eexact SEP.
 - instantiate (1 := rs1). apply agree_regs_undef_regs. apply agree_regs_call_regs. auto.
+- apply fe_ofs_callee_save_pos.
 - clear SEP. intros (rs' & m' & EXEC & SEP & PERMS & AG').
   exists rs', m'. 
   split. eexact EXEC.
@@ -1067,48 +1336,322 @@ Qed.
   (allocation of the frame + saving of the link and return address +
   saving of the used callee-save registers). *)
 
-Lemma function_prologue_correct:
-  forall j ls ls0 ls1 rs rs1 m1 m1' m2 sp parent ra cs fb k P,
-  agree_regs j ls rs ->
-  agree_callee_save ls ls0 ->
-  (forall r, Val.has_type (ls (R r)) (mreg_type r)) ->
-  ls1 = LTL.undef_regs destroyed_at_function_entry (LTL.call_regs ls) ->
-  rs1 = undef_regs destroyed_at_function_entry rs ->
-  Mem.alloc m1 0 f.(Linear.fn_stacksize) = (m2, sp) ->
-  Val.has_type parent Tptr -> Val.has_type ra Tptr ->
-  m1' |= minjection j m1 ** globalenv_inject ge j ** P ->
-  exists j', exists rs', exists m2', exists sp', exists m3', exists m4', exists m5',
-     Mem.alloc m1' 0 tf.(fn_stacksize) = (m2', sp')
-  /\ store_stack m2' (Vptr sp' Ptrofs.zero) Tptr tf.(fn_link_ofs) parent = Some m3'
-  /\ store_stack m3' (Vptr sp' Ptrofs.zero) Tptr tf.(fn_retaddr_ofs) ra = Some m4'
-  /\ star step tge
-         (State cs fb (Vptr sp' Ptrofs.zero) (save_callee_save fe k) rs1 m4')
-      E0 (State cs fb (Vptr sp' Ptrofs.zero) k rs' m5')
-  /\ agree_regs j' ls1 rs'
-  /\ agree_locs ls1 ls0
-  /\ m5' |= frame_contents j' sp' ls1 ls0 parent ra ** minjection j' m2 ** globalenv_inject ge j' ** P
-  /\ j' sp = Some(sp', fe.(fe_stack_data))
-  /\ inject_incr j j'.
+Definition no_inject_above (j: meminj) (m: mem)
+           (cursp: block) (curspofs: ptrofs) :=
+  forall b delta ofs k p,
+    j b = Some (cursp, delta) ->
+    Ptrofs.unsigned curspofs <= ofs + delta ->
+    ~ Mem.perm m b ofs k p.
+
+Definition all_injects_below (j: meminj) (m: mem)
+           (cursp: block) (curspofs: ptrofs) :=
+  forall b delta ofs k p,
+    j b = Some (cursp, delta) ->
+    Mem.perm m b ofs k p ->
+    ofs + delta < Ptrofs.unsigned curspofs.
+
+Lemma no_inject_above_rew:
+  forall j m cursp curspofs,
+    no_inject_above j m cursp curspofs <->
+    all_injects_below j m cursp curspofs.
 Proof.
-  intros until P; intros AGREGS AGCS WTREGS LS1 RS1 ALLOC TYPAR TYRA SEP.
+  unfold no_inject_above, all_injects_below; split; intros.
+  - specialize (fun pf => H _ _ _ _ _ H0 pf H1). Psatz.lia.
+  - intro P. specialize (H _ _ _ _ _ H0 P). Psatz.lia.
+Qed.
+
+Lemma shift_offset_range:
+  forall spofs lo i hi,
+    shift_offset spofs lo <= i < shift_offset spofs hi ->
+    exists j, shift_offset spofs j = i /\ lo <= j < hi.
+Proof.
+  unfold shift_offset.
+  intros.
+  exists (i - Ptrofs.unsigned spofs); omega.
+Qed.
+
+Lemma shift_offset_inj:
+  forall spofs a b,
+    shift_offset spofs a = shift_offset spofs b ->
+    a = b.
+Proof.
+  unfold shift_offset. intros; omega.
+Qed.
+
+Lemma alloc_parallel_rule:
+  forall m1 sz1 m1' b1 m2 sz2 sp spofs P j lo hi delta,
+    m2 |= minjection j m1 ** P ->
+    (forall o, m_footprint P sp o -> o < Ptrofs.unsigned spofs) ->
+  Mem.alloc m1 0 sz1 = (m1', b1) ->
+  Mem.valid_block m2 sp ->
+  (8 | delta) ->
+  lo = delta ->
+  hi = delta + Zmax 0 sz1 ->
+  0 <= shift_offset spofs sz2 <= Ptrofs.max_unsigned ->
+  0 <= delta -> hi <= sz2 ->
+  (forall ofs k, 0 <= ofs < sz2 ->
+            Mem.perm m2 sp (shift_offset spofs ofs) k Freeable) ->
+  (forall ofs k p, Mem.perm m2 sp ofs k p -> 0 <= ofs < Ptrofs.max_unsigned) ->
+  Ptrofs.unsigned spofs = align (Ptrofs.unsigned spofs) 8 ->
+  no_inject_above j m1 sp spofs ->
+  exists j',
+    m2 |= range sp (shift_offset spofs 0) (shift_offset spofs lo)
+       ** range sp (shift_offset spofs hi) (shift_offset spofs sz2)
+       ** minjection j' m1' ** P
+  /\ inject_incr j j'
+  /\ j' b1 = Some(sp, shift_offset spofs delta)
+  /\ (forall b, b <> b1 -> j' b = j b)
+  /\ no_inject_above j' m1' sp (Ptrofs.add spofs (Ptrofs.repr sz2)).
+Proof.
+  clear. intros until delta; intros SEP Pspec ALLOC1 VB ALIGN LO HI RANGE1 RANGE2 RANGE3 PERMS PERMS_INV ALIGNED NIA.
+  assert (RANGE4: lo <= hi) by xomega.
+  assert (FRESH1: ~Mem.valid_block m1 b1) by (eapply Mem.fresh_block_alloc; eauto).
+  destruct SEP as (INJ & SP & DISJ). simpl in INJ.
+  exploit Mem.alloc_left_mapped_inject.
+- apply INJ.
+- eexact ALLOC1.
+- apply VB.
+- instantiate (1 := shift_offset spofs delta).
+  unfold shift_offset.
+  generalize (Ptrofs.unsigned_range spofs).
+  split. omega.
+  etransitivity. 2: apply RANGE1. unfold shift_offset. omega.
+- intros. right; eapply PERMS_INV; eauto.
+- intros. 
+  apply Mem.perm_implies with Freeable; auto with mem.
+  rewrite Z.add_comm, shift_offset_assoc.
+  apply PERMS. subst. 
+  rewrite Z.max_r in RANGE3; omega.
+- red; intros. apply Zdivides_trans with 8; auto. 
+  exists (8 / align_chunk chunk). destruct chunk; reflexivity.
+  unfold shift_offset. apply Z.divide_add_r; auto. rewrite ALIGNED.
+  apply align_divides. omega.
+- intros. 
+  rewrite no_inject_above_rew in NIA. red in NIA.
+  specialize (NIA _ _ _ _ _ H H0).
+  unfold shift_offset in H1. omega.
+- intros (j' & INJ' & J1 & J2 & J3).
+  exists j'; split; [|repeat split]; auto.
+  + rewrite <- ! sep_assoc.
+    split; [|split].
+    * split.
+      split; [|split].
+      -- simpl. intuition auto; try (unfold Ptrofs.max_unsigned in *; omega).
+         ++ unfold shift_offset. generalize (Ptrofs.unsigned_range spofs); omega.
+         ++ etransitivity. apply shift_offset_le.
+            2: etransitivity. 2: apply H0. omega. unfold Ptrofs.max_unsigned; omega.
+         ++ destruct (shift_offset_range spofs 0 i lo) as (i0 & EQ & RNG); auto.
+            subst.
+            apply Mem.perm_implies with Freeable; auto with mem.
+            apply PERMS. omega.
+      -- simpl. intuition auto; try (unfold Ptrofs.max_unsigned in *; omega).
+         ++ unfold shift_offset. generalize (Ptrofs.unsigned_range spofs); omega.
+         ++ destruct (shift_offset_range spofs hi i sz2) as (i0 & EQ & RNG); auto.
+            subst.
+            apply Mem.perm_implies with Freeable; auto with mem.
+            apply PERMS. omega.
+      -- red; simpl; intros.
+         destruct H, H0.
+         apply shift_offset_range in H1.
+         apply shift_offset_range in H2.
+         destruct H1 as (j1 & SO1 & RNG1), H2 as (j2 & SO2 & RNG2). 
+         subst.
+         replace j1 with j2 in *. omega.
+         eapply shift_offset_inj; eauto.
+      -- split.
+         ++ simpl. assumption.
+         ++ red; simpl; intros.
+            Transparent sepconj.
+            unfold sepconj in H. simpl in H.
+            assert (b = sp) by tauto. subst b.
+            assert (shift_offset spofs 0 <= ofs < shift_offset spofs lo \/ shift_offset spofs hi <= ofs < shift_offset spofs sz2) by tauto.
+            clear H.
+            destruct H0 as (b0 & delta0 & D & E).
+            eapply Mem.perm_alloc_inv in E; eauto. 
+            destruct (eq_block b0 b1).
+            ** subst b0. rewrite J2 in D. inversion D; clear D; subst delta0.
+               subst. rewrite Z.max_r in * by omega.
+               assert (0 <= ofs - Ptrofs.unsigned spofs < delta \/
+                       delta + sz1 <= ofs - Ptrofs.unsigned spofs < sz2).
+               {
+                 destruct H1 as [A|A];
+                   destruct (shift_offset_range _ _ _ _ A) as (ofs' & EQ & RNG);
+                   subst; unfold shift_offset; omega.
+               }
+               clear H1.
+               unfold shift_offset in *. omega.
+            ** rewrite J3 in D by auto. unfold shift_offset in H1.
+               rewrite no_inject_above_rew in NIA. red in NIA.
+               specialize (NIA _ _ _ _ _ D E).
+               omega.
+    * apply (m_invar P) with m2; auto. eapply Mem.unchanged_on_refl; eauto. 
+    * red; simpl; intros. 
+      destruct H as [A | (b2 & delta0 & A & B)].
+      -- assert (b = sp) by tauto. subst b.
+         apply Pspec in H0.
+         unfold shift_offset in A. omega.
+      -- eelim DISJ; eauto. simpl.
+         eapply Mem.perm_alloc_inv in B; eauto. 
+         destruct (eq_block b2 b1).
+         ++ subst b2. rewrite J2 in A. inversion A; clear A; subst b delta0.
+            apply Pspec in H0. unfold shift_offset in B. omega.
+         ++ rewrite J3 in A by auto. exists b2, delta0; auto.
+  + red.
+    intros b0 delta0 ofs k p JB LE PERM.
+    eapply Mem.perm_alloc_inv in PERM; eauto.
+    destruct (eq_block b0 b1).
+    * subst b0.
+      rewrite J2 in JB. inv JB.
+      rewrite Ptrofs.add_unsigned in LE.
+      rewrite (Ptrofs.unsigned_repr sz2) in LE.
+      rewrite Ptrofs.unsigned_repr in LE.
+      unfold shift_offset in LE. subst.
+      assert (sz2 <= ofs + delta) by omega. clear LE.
+      rewrite Z.max_r in RANGE3; omega.
+      apply RANGE1.
+      generalize RANGE1. unfold shift_offset.
+      generalize (Ptrofs.unsigned_range spofs); intros; omega.
+    * rewrite J3 in JB.
+      eapply NIA. apply JB. 2: apply PERM.
+      rewrite Ptrofs.add_unsigned in LE.
+      rewrite (Ptrofs.unsigned_repr sz2) in LE.
+      rewrite Ptrofs.unsigned_repr in LE. omega.
+      apply RANGE1.
+      generalize RANGE1. unfold shift_offset.
+      generalize (Ptrofs.unsigned_range spofs); intros; omega.
+      auto.
+Qed.
+Opaque sepconj.
+
+Lemma globalenv_inject_incr:
+  forall j (F V: Type) (ge: Genv.t F V) m j' P,
+    inject_incr j j' ->
+    (forall b b' delta, j b = None -> j' b = Some (b', delta) -> Ple (Genv.genv_next ge) b') ->
+    m |= globalenv_inject ge j ** P ->
+    m |= globalenv_inject ge j' ** P.
+Proof.
+  clear.
+  intros j F V ge m j' P H SEP H0.
+  destruct H0 as (A & B & C). destruct A as (bound & D & E & E').
+  split; [|split]; auto.
+  exists bound; split; [|split]; auto. 
+  inv E; constructor; intros.
+- eauto.
+- destruct (j b1) as [[b0 delta0]|] eqn:JB1.
++ erewrite H in H0 by eauto. inv H0. eauto.
++ specialize (SEP _ _ _ JB1 H0).
+  xomega.
+- eauto.
+- eauto.
+- eauto.
+Qed.
+
+Lemma alloc_parallel_rule_2:
+  forall (F V: Type) (ge: Genv.t F V) m1 sz1 m1' b1 m2 sz2 sp spofs P j lo hi delta,
+    m2 |= minjection j m1 ** globalenv_inject ge j ** P ->
+    (forall o, m_footprint P sp o -> o < Ptrofs.unsigned spofs) ->
+  Mem.alloc m1 0 sz1 = (m1', b1) ->
+  Mem.valid_block m2 sp ->
+  (8 | delta) ->
+  lo = delta ->
+  hi = delta + Zmax 0 sz1 ->
+  0 <= shift_offset spofs sz2 <= Ptrofs.max_unsigned ->
+  0 <= delta -> hi <= sz2 ->
+  (forall (ofs : Z) (k : perm_kind), 0 <= ofs < sz2 -> Mem.perm m2 sp (shift_offset spofs ofs) k Freeable) ->
+  (forall (ofs : Z) (k : perm_kind) (p : permission), Mem.perm m2 sp ofs k p -> 0 <= ofs < Ptrofs.max_unsigned) ->
+  Ptrofs.unsigned spofs = align (Ptrofs.unsigned spofs) 8 ->
+  no_inject_above j m1 sp spofs ->
+  Ple (Genv.genv_next ge) sp ->
+  exists j',
+    m2 |= range sp (shift_offset spofs 0) (shift_offset spofs lo)
+        ** range sp (shift_offset spofs hi) (shift_offset spofs sz2)
+        ** minjection j' m1' ** globalenv_inject ge j' ** P
+    /\ inject_incr j j'
+    /\ j' b1 = Some(sp, shift_offset spofs delta)
+    /\ no_inject_above j' m1' sp (Ptrofs.add spofs (Ptrofs.repr sz2)).
+Proof.
+  clear. intros. 
+  set (j1 := fun b => if eq_block b b1 then Some(sp, shift_offset spofs delta) else j b).
+  assert (X: inject_incr j j1).
+  { unfold j1; red; intros. destruct (eq_block b b1); auto. 
+    subst b. eelim Mem.fresh_block_alloc. eexact H1.
+    eapply Mem.valid_block_inject_1. eauto. apply sep_proj1 in H. eexact H. }
+  assert (Y: forall b b' delta, j b = None -> j1 b = Some (b', delta) -> Ple (Genv.genv_next ge) b').
+  {
+    unfold j1; intros.
+    destruct (eq_block b b1). inv H15. auto. congruence.
+  }
+  rewrite sep_swap in H. eapply globalenv_inject_incr with (j' := j1) in H; eauto. rewrite sep_swap in H.
+  (* clear X Y. *)
+  exploit alloc_parallel_rule; eauto.
+  {
+    simpl. intros. destruct H14. easy. eauto.
+  }
+  intros (j' & A & B & C & D & E).
+  exists j'; split; auto.
+  rewrite sep_swap4 in A. rewrite sep_swap4. apply globalenv_inject_incr with j1; auto.
+- red; unfold j1; intros. destruct (eq_block b b1). inv H14. congruence. rewrite D; auto.
+- red; unfold j1; intros. destruct (eq_block b b1). congruence. rewrite D in H15 by auto. congruence.
+Qed.
+
+Lemma function_prologue_correct:
+  forall j ls ls0 ls1 rs rs1 m1 m1' m2 sp parent ra cs fb k P cursp curspofs,
+    agree_regs j ls rs ->
+    agree_callee_save ls ls0 ->
+    (forall r, Val.has_type (ls (R r)) (mreg_type r)) ->
+    ls1 = LTL.undef_regs destroyed_at_function_entry (LTL.call_regs ls) ->
+    rs1 = undef_regs destroyed_at_function_entry rs ->
+    Mem.alloc m1 0 f.(Linear.fn_stacksize) = (m2, sp) ->
+    Val.has_type parent Tptr -> Val.has_type ra Tptr ->
+    m1' |= minjection j m1 ** globalenv_inject ge j ** P ->
+    0 <= shift_offset curspofs (fe_size fe) <= Ptrofs.max_unsigned ->
+    no_inject_above j m1 cursp curspofs ->
+    (forall o : Z, m_footprint P cursp o -> o < Ptrofs.unsigned curspofs) ->
+    Mem.valid_block m1' cursp ->
+    (forall (ofs : Z) (k : perm_kind), 0 <= ofs < fe_size fe -> Mem.perm m1' cursp (shift_offset curspofs ofs) k Freeable) ->
+    (forall (ofs : Z) (k : perm_kind) (p : permission), Mem.perm m1' cursp ofs k p -> 0 <= ofs < Ptrofs.max_unsigned) ->
+    Ptrofs.unsigned curspofs = align (Ptrofs.unsigned curspofs) 8 ->
+    Ple (Genv.genv_next ge) cursp ->
+    exists j' rs' m3' m4' m5',
+      (* Mem.alloc m1' 0 tf.(fn_stacksize) = (m2', sp') *)
+      let sp' := Val.offset_ptr (Vptr cursp curspofs) (Ptrofs.repr (fn_stacksize tf)) in
+      store_stack m1' sp' Tptr tf.(fn_link_ofs) parent = Some m3'
+      /\ store_stack m3' sp' Tptr tf.(fn_retaddr_ofs) ra = Some m4'
+      /\ star step tge
+             (State cs fb sp' (save_callee_save fe k) rs1 m4')
+             E0 (State cs fb sp' k rs' m5')
+      /\ agree_regs j' ls1 rs'
+      /\ agree_locs ls1 ls0
+      /\ m5' |= frame_contents j' cursp curspofs ls1 ls0 parent ra ** minjection j' m2 ** globalenv_inject ge j' ** P
+      /\ j' sp = Some(cursp, shift_offset curspofs fe.(fe_stack_data))
+      /\ inject_incr j j'.
+Proof.
+  intros until P; intros cursp curspofs AGREGS AGCS WTREGS LS1 RS1 ALLOC TYPAR TYRA SEP RNG NIA Pspec VB PERMS PERMS_inv ALIGNED PLEGE.
   rewrite unfold_transf_function.
   unfold fn_stacksize, fn_link_ofs, fn_retaddr_ofs.
   (* Stack layout info *)
-Local Opaque b fe.
+  Local Opaque b fe.
   generalize (frame_env_range b) (frame_env_aligned b). replace (make_env b) with fe by auto. simpl. 
   intros LAYOUT1 LAYOUT2.
   (* Allocation step *)
-  destruct (Mem.alloc m1' 0 (fe_size fe)) as [m2' sp'] eqn:ALLOC'.
   exploit alloc_parallel_rule_2.
-  eexact SEP. eexact ALLOC. eexact ALLOC'. 
-  instantiate (1 := fe_stack_data fe). tauto.
-  reflexivity. 
-  instantiate (1 := fe_stack_data fe + bound_stack_data b). rewrite Z.max_comm. reflexivity.
-  generalize (bound_stack_data_pos b) size_no_overflow; omega.
-  tauto.
-  tauto.
-  clear SEP. intros (j' & SEP & INCR & SAME).
-  (* Remember the freeable permissions using a mconj *)
+  - eexact SEP.
+  - eexact Pspec.
+  - eexact ALLOC.
+  - eexact VB.
+  - instantiate (1 := fe_stack_data fe). tauto.
+  - reflexivity. 
+  - instantiate (1 := fe_stack_data fe + bound_stack_data b). rewrite Z.max_comm. reflexivity.
+  - apply RNG. 
+  - apply fe_stack_data_pos.
+  - generalize (bound_stack_data_pos b) size_no_overflow; omega.
+  - apply PERMS.
+  - apply PERMS_inv.
+  - apply ALIGNED.
+  - apply NIA.
+  - apply PLEGE.
+  - clear SEP. intros (j' & SEP & INCR & SAME & NIA').
+    (* Remember the freeable permissions using a mconj *)
   assert (SEPCONJ:
     m2' |= mconj (range sp' 0 (fe_stack_data fe) ** range sp' (fe_stack_data fe + bound_stack_data b) (fe_size fe))
                  (range sp' 0 (fe_stack_data fe) ** range sp' (fe_stack_data fe + bound_stack_data b) (fe_size fe))
@@ -1591,7 +2134,7 @@ Lemma find_function_translated:
   /\ Genv.find_funct_ptr tge bf = Some tf
   /\ transf_fundef f = OK tf.
 Proof.
-  intros until f; intros AG [bound [_ [[?????] _]]] FF.
+  intros until f; intros AG [bound [_ [?????]]] FF.
   destruct ros; simpl in FF.
 - exploit Genv.find_funct_inv; eauto. intros [b EQ]. rewrite EQ in FF.
   rewrite Genv.find_funct_find_funct_ptr in FF.
@@ -2142,14 +2685,12 @@ Proof.
   simpl. rewrite sep_pure. split; auto. split;[|split].
   eapply Genv.initmem_inject; eauto.
   simpl. exists (Mem.nextblock m0); split. apply Ple_refl.
-  split.
   unfold j, Mem.flat_inj; constructor; intros.
     apply pred_dec_true; auto.
     destruct (plt b1 (Mem.nextblock m0)); congruence.
     change (Mem.valid_block m0 b0). eapply Genv.find_symbol_not_fresh; eauto.
     change (Mem.valid_block m0 b0). eapply Genv.find_funct_ptr_not_fresh; eauto.
     change (Mem.valid_block m0 b0). eapply Genv.find_var_info_not_fresh; eauto.
-  erewrite <- Genv.init_mem_genv_next; eauto. reflexivity.
   red; simpl; tauto.
 Qed.
 

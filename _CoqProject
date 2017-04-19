@@ -1,0 +1,9 @@
+-R common compcert.common
+-R cfrontend compcert.cfrontend
+-R lib compcert.lib
+-R backend compcert.backend
+-R cparser compcert.cparser
+-R flocq compcert.flocq
+-R driver compcert.driver
+-R x86_64 compcert.x86_64
+-R x86 compcert.x86 
