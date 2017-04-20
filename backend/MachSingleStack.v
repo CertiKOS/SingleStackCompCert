@@ -168,8 +168,8 @@ Inductive step: state -> trace -> state -> Prop :=
       let sp := Val.offset_ptr (parent_sp s) (Ptrofs.repr (fn_stacksize f)) in
       (* Mem.alloc m 0 f.(fn_stacksize) = (m1, stk) -> *)
       (* let sp := Vptr stk Ptrofs.zero in *)
-      store_stack m sp Tptr f.(fn_link_ofs) (parent_sp s) = Some m2 ->
-      store_stack m2 sp Tptr f.(fn_retaddr_ofs) (parent_ra s) = Some m3 ->
+      store_stack m (parent_sp s) Tptr f.(fn_link_ofs) (parent_sp s) = Some m2 ->
+      store_stack m2 (parent_sp s) Tptr f.(fn_retaddr_ofs) (parent_ra s) = Some m3 ->
       rs' = undef_regs destroyed_at_function_entry rs ->
       step (Callstate s fb rs m)
         E0 (State s fb sp f.(fn_code) rs' m3)
