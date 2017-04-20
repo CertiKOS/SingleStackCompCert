@@ -2257,59 +2257,80 @@ Proof.
       + subst. rewrite INJ in H. inv H.
         exploit Mem.perm_free_2; eauto.
         { 
-          unfold frame_contents in SEPsave.
-          apply mconj_proj2 in SEPsave.
-          rewrite sep_assoc in SEPsave.
-          rewrite <- sep_assoc in SEPsave.
-          rewrite <- sep_assoc in SEPsave.
-          apply sep_proj1 in SEPsave.
-          destruct SEPsave as (A&B&C).
-          rewrite Ptrofs.add_unsigned in g.
-          rewrite (Ptrofs.unsigned_repr (fn_stacksize tf)) in g.
-          rewrite Ptrofs.unsigned_repr in g.
-          apply Z.gt_lt in g.
-          rewrite unfold_transf_function in g. simpl in g.
-          assert (0 <= ofs < Linear.fn_stacksize f \/ (ofs < 0 \/ Linear.fn_stacksize f <= ofs)). omega.
-          destruct H; auto.
-          eelim C.
-          Local Transparent range sepconj. simpl.
-          Local Opaque range sepconj.
-          Focus 2.
 
-          simpl. eexists; eexists; split.
-          apply INJ.
-          instantiate (1 := shift_offset spofs (fe_stack_data fe) + ofs).
-          eapply Mem.perm_max. eapply Mem.perm_implies; eauto.
-          rewrite Z.add_simpl_l. eauto. constructor.
-          cut (shift_offset spofs 0 <= shift_offset spofs (fe_stack_data fe) + ofs < shift_offset spofs (fe_stack_data fe) \/
-               shift_offset spofs (fe_stack_data fe + bound_stack_data b) <= shift_offset spofs (fe_stack_data fe) + ofs <
-               shift_offset spofs (align (fe_size fe) 8)). intuition.
-          cut (0 <= fe_stack_data fe + ofs < fe_stack_data fe \/
-                (fe_stack_data fe + bound_stack_data b) <=  (fe_stack_data fe) + ofs <
+          Lemma frame_contents_ofs_rng:
+            forall m' sp' spofs ls ls0 pa ra j m P ofs,
+              m' |= frame_contents j sp' spofs ls ls0 pa ra ** minjection j m ** P ->
+              Ptrofs.unsigned (Ptrofs.add spofs (Ptrofs.repr (fn_stacksize tf))) >
+              ofs + shift_offset spofs (fe_stack_data fe) ->
+              forall sp m1,
+              j sp = Some (sp', shift_offset spofs (fe_stack_data fe)) ->
+              Mem.free m sp 0 (Linear.fn_stacksize f) = Some m1 ->
+              0 <= Ptrofs.unsigned spofs + fn_stacksize tf <= Ptrofs.max_unsigned ->
+              forall k0 p,
+                Mem.perm m sp ofs k0 p ->
+                Ptrofs.unsigned spofs <= ofs + shift_offset spofs (fe_stack_data fe) ->
+              0 <= ofs < Linear.fn_stacksize f.
+          Proof.
+            intros m' sp' spofs ls ls0 pa ra j m P ofs SEPsave g sp m1 INJ FREE BND k0 p PERM H0.
+            unfold frame_contents in SEPsave.
+            apply mconj_proj2 in SEPsave.
+            rewrite sep_assoc in SEPsave.
+            rewrite <- sep_assoc in SEPsave.
+            rewrite <- sep_assoc in SEPsave.
+            apply sep_proj1 in SEPsave.
+            destruct SEPsave as (A&B&C).
+            rewrite Ptrofs.add_unsigned in g.
+            rewrite (Ptrofs.unsigned_repr (fn_stacksize tf)) in g.
+            rewrite Ptrofs.unsigned_repr in g.
+            apply Z.gt_lt in g.
+            rewrite unfold_transf_function in g. simpl in g.
+            assert (0 <= ofs < Linear.fn_stacksize f \/ (ofs < 0 \/ Linear.fn_stacksize f <= ofs)). omega.
+            destruct H; auto.
+            eelim C.
+            Local Transparent range sepconj. simpl.
+            Local Opaque range sepconj.
+            Focus 2.
+
+            simpl. eexists; eexists; split.
+            apply INJ.
+            instantiate (1 := shift_offset spofs (fe_stack_data fe) + ofs).
+            eapply Mem.perm_max. eapply Mem.perm_implies; eauto.
+            rewrite Z.add_simpl_l. eauto. constructor.
+            cut (shift_offset spofs 0 <= shift_offset spofs (fe_stack_data fe) + ofs < shift_offset spofs (fe_stack_data fe) \/
+                 shift_offset spofs (fe_stack_data fe + bound_stack_data b) <= shift_offset spofs (fe_stack_data fe) + ofs <
+                 shift_offset spofs (align (fe_size fe) 8)). intuition.
+            cut (0 <= fe_stack_data fe + ofs < fe_stack_data fe \/
+                 (fe_stack_data fe + bound_stack_data b) <=  (fe_stack_data fe) + ofs <
                  (align (fe_size fe) 8)). unfold shift_offset. intuition.
-          assert (ofs + fe_stack_data fe < align (fe_size fe) 8).
-          unfold shift_offset in g. omega. clear g.
-          assert (0 <= ofs + fe_stack_data fe). unfold shift_offset in H0; omega.
-          destruct (zlt ofs 0). left.  omega. destruct H. omega. 
-          right. split. apply Z.add_le_mono. reflexivity. replace b with (function_bounds f). simpl.
-          rewrite Zmax_spec. destruct (zlt 0 (Linear.fn_stacksize f)). omega. omega. reflexivity. omega.
-
-          apply BND.
-
-          rewrite unfold_transf_function. simpl.
-          split.
-          etransitivity. 2: apply align_le; omega. apply fe_size_pos.
-          etransitivity. 2: apply BND.
-          rewrite unfold_transf_function. simpl.
-          generalize (Ptrofs.unsigned_range spofs); omega.
+            assert (ofs + fe_stack_data fe < align (fe_size fe) 8).
+            unfold shift_offset in g. omega. clear g.
+            assert (0 <= ofs + fe_stack_data fe). unfold shift_offset in H0; omega.
+            destruct (zlt ofs 0). left.  omega. destruct H. omega. 
+            right. split. apply Z.add_le_mono. reflexivity. replace b with (function_bounds f). simpl.
+            rewrite Zmax_spec. destruct (zlt 0 (Linear.fn_stacksize f)). omega. omega. reflexivity. omega.
+            apply BND.
+            rewrite unfold_transf_function. simpl.
+            split.
+            etransitivity. 2: apply align_le; omega. apply fe_size_pos.
+            etransitivity. 2: apply BND.
+            rewrite unfold_transf_function. simpl.
+            generalize (Ptrofs.unsigned_range spofs); omega.
+          Qed.
+          eapply frame_contents_ofs_rng; eauto.
         }
       + generalize (fun ofs1 ofs2 => Mem.mi_no_overlap _ _ _ MINJ1 _ _ _ _ _ _ ofs1 ofs2 n H INJ).
         intro A.
         apply Mem.perm_max in PERM'.
         eapply Mem.perm_implies in PERM'.
-        specialize (A _ (ofs + delta - shift_offset spofs (fe_stack_data fe)) PERM').
+        specialize (fun ofs2 => A _ ofs2 PERM').
         2: constructor.
         destruct A; try congruence; try omega.
+        eapply Mem.perm_max. eapply Mem.perm_implies.
+        eapply Mem.free_range_perm. eauto.
+        2: constructor.
+        eapply frame_contents_ofs_rng; eauto. omega. 2: omega.
+        
         
   }
 Qed.
